@@ -18,17 +18,9 @@ fi
 # Build configuration. Common values include 'Debug' and 'Release', but the repository may use other names.
 configuration=${configuration:-'Debug'}
 
-# Set to true to opt out of outputting binary log while running in CI
-exclude_ci_binary_log=${exclude_ci_binary_log:-false}
-
-if [[ "$ci" == true && "$exclude_ci_binary_log" == false ]]; then
-  binary_log_default=true
-else
-  binary_log_default=false
-fi
-
 # Set to true to output binary log from msbuild. Note that emitting binary log slows down the build.
-binary_log=${binary_log:-$binary_log_default}
+# Binary log must be enabled on CI.
+binary_log=${binary_log:-$ci}
 
 # Turns on machine preparation/clean up code that changes the machine state (e.g. kills build processes).
 prepare_machine=${prepare_machine:-false}
@@ -85,7 +77,7 @@ function ResolvePath {
 function ReadGlobalVersion {
   local key=$1
 
-  local line=$(awk "/$key/ {print; exit}" "$global_json_file")
+  local line=`grep -m 1 "$key" "$global_json_file"`
   local pattern="\"$key\" *: *\"(.*)\""
 
   if [[ ! $line =~ $pattern ]]; then
@@ -209,14 +201,7 @@ function InstallDotNet {
 
       local runtimeSourceFeedKey=''
       if [[ -n "${7:-}" ]]; then
-        # The 'base64' binary on alpine uses '-d' and doesn't support '--decode'
-        # '-d'. To work around this, do a simple detection and switch the parameter
-        # accordingly.
-        decodeArg="--decode"
-        if base64 --help 2>&1 | grep -q "BusyBox"; then
-            decodeArg="-d"
-        fi
-        decodedFeedKey=`echo $7 | base64 $decodeArg`
+        decodedFeedKey=`echo $7 | base64 --decode`
         runtimeSourceFeedKey="--feed-credential $decodedFeedKey"
       fi
 
@@ -412,8 +397,8 @@ function MSBuild {
 
 function MSBuild-Core {
   if [[ "$ci" == true ]]; then
-    if [[ "$binary_log" != true && "$exclude_ci_binary_log" != true ]]; then
-      Write-PipelineTelemetryError -category 'Build'  "Binary log must be enabled in CI build, or explicitly opted-out from with the -noBinaryLog switch."
+    if [[ "$binary_log" != true ]]; then
+      Write-PipelineTelemetryError -category 'Build'  "Binary log must be enabled in CI build."
       ExitWithExitCode 1
     fi
 
@@ -430,17 +415,11 @@ function MSBuild-Core {
     warnaserror_switch="/warnaserror"
   fi
 
-  function RunBuildTool {
-    export ARCADE_BUILD_TOOL_COMMAND="$_InitializeBuildTool $@"
-
-    "$_InitializeBuildTool" "$@" || {
-      local exit_code=$?
-      Write-PipelineTaskError "Build failed (exit code '$exit_code')."
-      ExitWithExitCode $exit_code
-    }
+  "$_InitializeBuildTool" "$_InitializeBuildToolCommand" /m /nologo /clp:Summary /v:$verbosity /nr:$node_reuse $warnaserror_switch /p:TreatWarningsAsErrors=$warn_as_error /p:ContinuousIntegrationBuild=$ci "$@" || {
+    local exit_code=$?
+    Write-PipelineTelemetryError -category 'Build'  "Build failed (exit code '$exit_code')."
+    ExitWithExitCode $exit_code
   }
-
-  RunBuildTool "$_InitializeBuildToolCommand" /m /nologo /clp:Summary /v:$verbosity /nr:$node_reuse $warnaserror_switch /p:TreatWarningsAsErrors=$warn_as_error /p:ContinuousIntegrationBuild=$ci "$@"
 }
 
 ResolvePath "${BASH_SOURCE[0]}"
@@ -459,7 +438,7 @@ temp_dir="$artifacts_dir/tmp/$configuration"
 global_json_file="$repo_root/global.json"
 # determine if global.json contains a "runtimes" entry
 global_json_has_runtimes=false
-dotnetlocal_key=$(awk "/runtimes/ {print; exit}" "$global_json_file") || true
+dotnetlocal_key=`grep -m 1 "runtimes" "$global_json_file"` || true
 if [[ -n "$dotnetlocal_key" ]]; then
   global_json_has_runtimes=true
 fi
